@@ -1,13 +1,5 @@
-module.exports = [
-	/*
-	 * Place your upgrade scripts here
-	 * Remember that once it has been added it cannot be removed!
-	 */
-	// function (context, props) {
-	// 	return {
-	// 		updatedConfig: null,
-	// 		updatedActions: [],
-	// 		updatedFeedbacks: [],
-	// 	}
-	// },
-]
+/*
+ * Upgrade scripts migrate saved configs/actions/feedbacks between module versions.
+ * Once an upgrade script has been released it must never be removed or reordered.
+ */
+export const UpgradeScripts = []

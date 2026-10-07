@@ -1,18 +1,18 @@
 {
 	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
 	"type": "connection",
-	"id": "your-module-name",
-	"name": "your-module-name",
-	"shortname": "module-shortname",
-	"description": "A short one line description of your module",
+	"id": "showsign-signage",
+	"name": "showsign-signage",
+	"shortname": "ShowSign",
+	"description": "Fire ShowSign announcement cues to screen groups (take-your-seats prompts, brand loops, and more).",
 	"version": "0.0.0",
 	"license": "MIT",
-	"repository": "git+https://github.com/bitfocus/companion-module-your-module-name.git",
-	"bugs": "https://github.com/bitfocus/companion-module-your-module-name/issues",
+	"repository": "git+https://github.com/bitfocus/companion-module-showsign-signage.git",
+	"bugs": "https://github.com/bitfocus/companion-module-showsign-signage/issues",
 	"maintainers": [
 		{
-			"name": "Your name",
-			"email": "Your email"
+			"name": "Jacob Abart",
+			"email": "abartjc@gmail.com"
 		}
 	],
 	"runtime": {
@@ -22,7 +22,7 @@
 		"entrypoint": "../src/main.js"
 	},
 	"legacyIds": [],
-	"manufacturer": "Your company",
-	"products": ["Your product"],
-	"keywords": []
+	"manufacturer": "ShowSign",
+	"products": ["Signage"],
+	"keywords": ["signage", "announcements", "events", "digital signage"]
 }

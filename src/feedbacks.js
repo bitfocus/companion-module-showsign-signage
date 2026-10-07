@@ -1,30 +1,22 @@
-module.exports = async function (self) {
+import { combineRgb } from '@companion-module/base'
+
+export function updateFeedbacks(self) {
+	const groups = self.groupChoices()
+	const cues = self.cueChoices()
+
 	self.setFeedbackDefinitions({
-		ChannelState: {
-			name: 'Example Feedback',
+		group_showing: {
 			type: 'boolean',
-			label: 'Channel State',
-			defaultStyle: {
-				bgcolor: 0xff0000,
-				color: 0x000000,
-			},
+			name: 'Group is showing cue',
+			description: 'Lights the button while the chosen group is currently showing the chosen cue.',
+			defaultStyle: { bgcolor: combineRgb(253, 199, 25), color: combineRgb(0, 0, 0) },
 			options: [
-				{
-					id: 'num',
-					type: 'number',
-					label: 'Test',
-					default: 5,
-					min: 0,
-					max: 10,
-				},
+				{ type: 'dropdown', id: 'group', label: 'Group', choices: groups, default: groups[0]?.id ?? '' },
+				{ type: 'dropdown', id: 'cue', label: 'Cue', choices: cues, default: cues[0]?.id ?? '' },
 			],
-			callback: (feedback) => {
-				console.log('Hello world!', feedback.options.num)
-				if (feedback.options.num > 5) {
-					return true
-				} else {
-					return false
-				}
+			callback: ({ options }) => {
+				const live = self.context.active.find((a) => a.groupId === options.group)
+				return Boolean(live && live.cueId === options.cue)
 			},
 		},
 	})
