@@ -2,20 +2,54 @@ import { InstanceBase, InstanceStatus, Regex } from '@companion-module/base'
 import { UpgradeScripts } from './upgrades.js'
 import { updateActions } from './actions.js'
 import { updateFeedbacks } from './feedbacks.js'
+import { updatePresets } from './presets.js'
 import { updateVariableDefinitions, updateVariableValues } from './variables.js'
 
 export { UpgradeScripts }
 
 const POLL_INTERVAL_MS = 4000
 const REQUEST_TIMEOUT_MS = 5000
+/** How long the "Last action failed" feedback stays lit after a failed press. */
+const FAILED_FEEDBACK_MS = 10000
+
+/** Plain words for the network errors Node's fetch keeps in `cause`. */
+const NETWORK_REASONS = {
+	ENOTFOUND: 'host name not found',
+	EAI_AGAIN: 'host name lookup failed (DNS)',
+	ECONNREFUSED: 'connection refused',
+	ECONNRESET: 'connection reset',
+	EHOSTUNREACH: 'host unreachable',
+	ENETUNREACH: 'network unreachable',
+	ETIMEDOUT: 'connection timed out',
+	UND_ERR_CONNECT_TIMEOUT: 'connection timed out',
+	CERT_HAS_EXPIRED: 'TLS certificate has expired',
+	DEPTH_ZERO_SELF_SIGNED_CERT: 'self-signed TLS certificate',
+	SELF_SIGNED_CERT_IN_CHAIN: 'self-signed TLS certificate',
+	UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'TLS certificate could not be verified',
+	ERR_TLS_CERT_ALTNAME_INVALID: 'TLS certificate does not match the host name',
+}
+
+/**
+ * A readable message for a failed request. Node's fetch reports every network failure as
+ * "fetch failed" and keeps the real reason (ENOTFOUND, ECONNREFUSED, TLS…) in `cause`.
+ */
+export function describeError(e) {
+	if (e?.name === 'TimeoutError') return `No answer from ShowSign within ${REQUEST_TIMEOUT_MS / 1000} s`
+	const message = String(e?.message || e)
+	const cause = e?.cause
+	const code = cause?.code
+	const reason = (code && NETWORK_REASONS[code]) || code || cause?.message
+	if (!reason || message.includes(reason)) return message
+	return `${message}: ${reason}${code && NETWORK_REASONS[code] ? ` (${code})` : ''}`
+}
 
 /**
  * ShowSign Signage — fire on-screen announcement cues to groups of ShowSign displays.
  *
  * Talks to the ShowSign automation API with an event-scoped automation key (Portal →
  * Event → Announcements → Automation keys). Polls /automation/context to keep the group and
- * cue dropdowns and the live-state feedback in sync, and fires cues via /automation/announce
- * and /automation/clear.
+ * cue dropdowns, presets and the live-state feedback in sync, and fires cues via
+ * /automation/announce and /automation/clear.
  */
 export default class ShowSignInstance extends InstanceBase {
 	async init(config, _isFirstInit, secrets) {
@@ -24,6 +58,9 @@ export default class ShowSignInstance extends InstanceBase {
 		this.context = { event: null, groups: [], cues: [], active: [] }
 		this.definitionsKey = null
 		this.lastError = null
+		this.lastActionError = ''
+		this.actionFailedAt = 0
+		this.actionFailedGroup = null
 		this.polling = false
 
 		this.updateStatus(InstanceStatus.Connecting)
@@ -35,6 +72,8 @@ export default class ShowSignInstance extends InstanceBase {
 	async destroy() {
 		if (this.pollTimer) clearInterval(this.pollTimer)
 		this.pollTimer = undefined
+		if (this.failedTimer) clearTimeout(this.failedTimer)
+		this.failedTimer = undefined
 	}
 
 	async configUpdated(config, secrets) {
@@ -92,7 +131,16 @@ export default class ShowSignInstance extends InstanceBase {
 			},
 		})
 		if (!res.ok) {
-			const err = new Error(`${res.status} ${res.statusText}`)
+			// ShowSign explains a refusal in the body ({"error": "..."}); show that, not just the status.
+			const text = await res.text().catch(() => '')
+			let detail = ''
+			try {
+				const body = JSON.parse(text)
+				detail = typeof body?.error === 'string' ? body.error : typeof body?.message === 'string' ? body.message : ''
+			} catch {
+				detail = text.length <= 200 ? text.trim() : ''
+			}
+			const err = new Error(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`)
 			err.status = res.status
 			throw err
 		}
@@ -132,7 +180,7 @@ export default class ShowSignInstance extends InstanceBase {
 			if (e.status === 401 || e.status === 403) {
 				this.setError(InstanceStatus.BadConfig, 'Invalid or revoked automation key')
 			} else {
-				this.setError(InstanceStatus.ConnectionFailure, String(e.message || e))
+				this.setError(InstanceStatus.ConnectionFailure, describeError(e))
 			}
 		} finally {
 			this.polling = false
@@ -147,33 +195,118 @@ export default class ShowSignInstance extends InstanceBase {
 		return this.context.cues.map((c) => ({ id: c.id, label: c.label }))
 	}
 
-	/** (Re)publish actions/feedbacks/variables only when the set of groups or cues changes. */
+	/**
+	 * The group/cue id for an option value. Dropdowns hand over the id; an expression may return
+	 * the id or the name shown in ShowSign (any case).
+	 */
+	resolveId(list, value, nameKey) {
+		const v = String(value ?? '').trim()
+		if (!v) return null
+		const byId = list.find((x) => String(x.id) === v)
+		if (byId) return byId.id
+		const lower = v.toLowerCase()
+		const byName = list.find(
+			(x) =>
+				String(x[nameKey] ?? '')
+					.trim()
+					.toLowerCase() === lower,
+		)
+		return byName ? byName.id : null
+	}
+
+	resolveGroup(value) {
+		return this.resolveId(this.context.groups, value, 'name')
+	}
+
+	resolveCue(value) {
+		return this.resolveId(this.context.cues, value, 'label')
+	}
+
+	/** (Re)publish actions/feedbacks/presets/variables only when the set of groups or cues changes. */
 	defineAll(force = false) {
 		const key = JSON.stringify([this.groupChoices(), this.cueChoices()])
 		if (!force && key === this.definitionsKey) return
 		this.definitionsKey = key
 		updateActions(this)
 		updateFeedbacks(this)
+		updatePresets(this)
 		updateVariableDefinitions(this)
 	}
 
-	async fireCue(groupId, cueId, ttlSeconds) {
+	/** A press worked: clear the failure marker. */
+	actionSucceeded() {
+		if (!this.lastActionError && !this.actionFailedAt) return
+		this.lastActionError = ''
+		this.actionFailedAt = 0
+		this.actionFailedGroup = null
+		if (this.failedTimer) clearTimeout(this.failedTimer)
+		this.failedTimer = undefined
+		updateVariableValues(this)
+		this.checkFeedbacks('action_failed')
+	}
+
+	/** A press failed: log it, show it on the surface (variable + feedback), and flag a bad key. */
+	actionFailed(what, e, groupId = null) {
+		const message = e?.status ? String(e.message) : describeError(e)
+		this.log('error', `${what} failed: ${message}`)
+		this.lastActionError = `${what} failed: ${message}`
+		this.actionFailedAt = Date.now()
+		this.actionFailedGroup = groupId
+		updateVariableValues(this)
+		this.checkFeedbacks('action_failed')
+		if (this.failedTimer) clearTimeout(this.failedTimer)
+		this.failedTimer = setTimeout(() => {
+			this.failedTimer = undefined
+			this.checkFeedbacks('action_failed')
+		}, FAILED_FEEDBACK_MS + 50)
+		if (e?.status === 401 || e?.status === 403) {
+			this.setError(InstanceStatus.BadConfig, 'Invalid or revoked automation key')
+		}
+	}
+
+	/** A press failed in the last 10 s (on this group, when one is given). */
+	actionFailedRecently(groupValue) {
+		if (!(this.actionFailedAt > 0 && Date.now() - this.actionFailedAt < FAILED_FEEDBACK_MS)) return false
+		if (!groupValue) return true
+		const groupId = this.resolveGroup(groupValue) ?? String(groupValue)
+		return groupId === this.actionFailedGroup
+	}
+
+	async fireCue(groupValue, cueValue, ttlSeconds) {
+		const groupId = this.resolveGroup(groupValue)
+		const cueId = this.resolveCue(cueValue)
+		if (!groupId || !cueId) {
+			const missing = !groupId ? `group "${groupValue ?? ''}"` : `cue "${cueValue ?? ''}"`
+			this.actionFailed('Fire', new Error(`no ${missing} in this ShowSign event`), groupId ?? String(groupValue ?? ''))
+			return
+		}
 		const body = { groupId, cueId }
 		if (ttlSeconds > 0) body.ttlSeconds = ttlSeconds
 		try {
 			await this.api('/automation/announce', { method: 'POST', body: JSON.stringify(body) })
+			this.actionSucceeded()
 			await this.poll()
 		} catch (e) {
-			this.log('error', `Fire failed: ${e.message || e}`)
+			this.actionFailed('Fire', e, groupId)
 		}
 	}
 
-	async clearGroup(groupId) {
+	async clearGroup(groupValue) {
+		const groupId = this.resolveGroup(groupValue)
+		if (!groupId) {
+			this.actionFailed(
+				'Clear',
+				new Error(`no group "${groupValue ?? ''}" in this ShowSign event`),
+				String(groupValue ?? ''),
+			)
+			return
+		}
 		try {
 			await this.api('/automation/clear', { method: 'POST', body: JSON.stringify({ groupId }) })
+			this.actionSucceeded()
 			await this.poll()
 		} catch (e) {
-			this.log('error', `Clear failed: ${e.message || e}`)
+			this.actionFailed('Clear', e, groupId)
 		}
 	}
 }

@@ -1,4 +1,5 @@
 import { combineRgb } from '@companion-module/base'
+import { cueOption, groupOption } from './actions.js'
 
 export function updateFeedbacks(self) {
 	const groups = self.groupChoices()
@@ -10,14 +11,29 @@ export function updateFeedbacks(self) {
 			name: 'Group is showing cue',
 			description: 'Lights the button while the chosen group is currently showing the chosen cue.',
 			defaultStyle: { bgcolor: combineRgb(253, 199, 25), color: combineRgb(0, 0, 0) },
-			options: [
-				{ type: 'dropdown', id: 'group', label: 'Group', choices: groups, default: groups[0]?.id ?? '' },
-				{ type: 'dropdown', id: 'cue', label: 'Cue', choices: cues, default: cues[0]?.id ?? '' },
-			],
+			options: [groupOption(groups), cueOption(cues)],
 			callback: ({ options }) => {
-				const live = self.context.active.find((a) => a.groupId === options.group)
-				return Boolean(live && live.cueId === options.cue)
+				const groupId = self.resolveGroup(options.group)
+				const cueId = self.resolveCue(options.cue)
+				if (!groupId || !cueId) return false
+				const live = self.context.active.find((a) => a.groupId === groupId)
+				return Boolean(live && live.cueId === cueId)
 			},
+		},
+		action_failed: {
+			type: 'boolean',
+			name: 'Last action failed',
+			description:
+				'Lights the button for 10 seconds after a Fire or Clear press that ShowSign refused or could not receive (the reason is in the last_action_error variable and the log).',
+			defaultStyle: { bgcolor: combineRgb(200, 0, 0), color: combineRgb(255, 255, 255) },
+			options: [
+				{
+					...groupOption([{ id: '', label: 'Any group' }, ...groups]),
+					label: 'For presses on',
+					default: '',
+				},
+			],
+			callback: ({ options }) => self.actionFailedRecently(options.group),
 		},
 	})
 }

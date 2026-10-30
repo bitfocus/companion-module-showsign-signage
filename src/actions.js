@@ -1,3 +1,30 @@
+/** Group and cue pickers. In expression mode the expression may return the name or the id. */
+export function groupOption(groups) {
+	return {
+		type: 'dropdown',
+		id: 'group',
+		label: 'Group',
+		choices: groups,
+		default: groups[0]?.id ?? '',
+		allowInvalidValues: true,
+		expressionDescription:
+			'The expression must return the screen group’s name exactly as shown in ShowSign (any case), or its ShowSign id.',
+	}
+}
+
+export function cueOption(cues) {
+	return {
+		type: 'dropdown',
+		id: 'cue',
+		label: 'Cue',
+		choices: cues,
+		default: cues[0]?.id ?? '',
+		allowInvalidValues: true,
+		expressionDescription:
+			'The expression must return the cue’s name exactly as shown in ShowSign (any case), or its ShowSign id.',
+	}
+}
+
 export function updateActions(self) {
 	const groups = self.groupChoices()
 	const cues = self.cueChoices()
@@ -7,8 +34,8 @@ export function updateActions(self) {
 			name: 'Fire cue on group',
 			description: 'Show a cue on every display in a screen group.',
 			options: [
-				{ type: 'dropdown', id: 'group', label: 'Group', choices: groups, default: groups[0]?.id ?? '' },
-				{ type: 'dropdown', id: 'cue', label: 'Cue', choices: cues, default: cues[0]?.id ?? '' },
+				groupOption(groups),
+				cueOption(cues),
 				{
 					type: 'number',
 					id: 'ttl',
@@ -25,7 +52,7 @@ export function updateActions(self) {
 		clear: {
 			name: 'Clear group',
 			description: 'Remove the current announcement from every display in a screen group.',
-			options: [{ type: 'dropdown', id: 'group', label: 'Group', choices: groups, default: groups[0]?.id ?? '' }],
+			options: [groupOption(groups)],
 			callback: async ({ options }) => {
 				await self.clearGroup(options.group)
 			},
