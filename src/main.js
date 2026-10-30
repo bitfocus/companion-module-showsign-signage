@@ -59,8 +59,9 @@ export default class ShowSignInstance extends InstanceBase {
 		this.definitionsKey = null
 		this.lastError = null
 		this.lastActionError = ''
-		this.actionFailedAt = 0
-		this.actionFailedGroup = null
+		/** Failed presses per group: group id (or the value pressed) → when it failed. */
+		this.failures = new Map()
+		this.failedTimers = new Set()
 		this.polling = false
 
 		this.updateStatus(InstanceStatus.Connecting)
@@ -72,8 +73,8 @@ export default class ShowSignInstance extends InstanceBase {
 	async destroy() {
 		if (this.pollTimer) clearInterval(this.pollTimer)
 		this.pollTimer = undefined
-		if (this.failedTimer) clearTimeout(this.failedTimer)
-		this.failedTimer = undefined
+		for (const t of this.failedTimers ?? []) clearTimeout(t)
+		this.failedTimers?.clear()
 	}
 
 	async configUpdated(config, secrets) {
@@ -233,43 +234,52 @@ export default class ShowSignInstance extends InstanceBase {
 		updateVariableDefinitions(this)
 	}
 
-	/** A press worked: clear the failure marker. */
-	actionSucceeded() {
-		if (!this.lastActionError && !this.actionFailedAt) return
+	/** A press on this group worked: clear its failure (other groups keep theirs). */
+	actionSucceeded(groupId) {
+		const had = this.failures.delete(groupId)
+		if (!had && !this.lastActionError) return
 		this.lastActionError = ''
-		this.actionFailedAt = 0
-		this.actionFailedGroup = null
-		if (this.failedTimer) clearTimeout(this.failedTimer)
-		this.failedTimer = undefined
 		updateVariableValues(this)
 		this.checkFeedbacks('action_failed')
 	}
 
 	/** A press failed: log it, show it on the surface (variable + feedback), and flag a bad key. */
-	actionFailed(what, e, groupId = null) {
+	actionFailed(what, e, groupId) {
 		const message = e?.status ? String(e.message) : describeError(e)
 		this.log('error', `${what} failed: ${message}`)
 		this.lastActionError = `${what} failed: ${message}`
-		this.actionFailedAt = Date.now()
-		this.actionFailedGroup = groupId
+		this.failures.set(String(groupId ?? ''), Date.now())
 		updateVariableValues(this)
 		this.checkFeedbacks('action_failed')
-		if (this.failedTimer) clearTimeout(this.failedTimer)
-		this.failedTimer = setTimeout(() => {
-			this.failedTimer = undefined
+		// Each failure has its own 10 s; re-check when this one runs out.
+		const t = setTimeout(() => {
+			this.failedTimers.delete(t)
+			for (const [g, at] of this.failures) if (Date.now() - at >= FAILED_FEEDBACK_MS) this.failures.delete(g)
 			this.checkFeedbacks('action_failed')
 		}, FAILED_FEEDBACK_MS + 50)
+		this.failedTimers.add(t)
 		if (e?.status === 401 || e?.status === 403) {
 			this.setError(InstanceStatus.BadConfig, 'Invalid or revoked automation key')
 		}
 	}
 
-	/** A press failed in the last 10 s (on this group, when one is given). */
+	/** A press failed in the last 10 s on this group (or on any group, when none is given). */
 	actionFailedRecently(groupValue) {
-		if (!(this.actionFailedAt > 0 && Date.now() - this.actionFailedAt < FAILED_FEEDBACK_MS)) return false
-		if (!groupValue) return true
-		const groupId = this.resolveGroup(groupValue) ?? String(groupValue)
-		return groupId === this.actionFailedGroup
+		const fresh = (at) => at !== undefined && Date.now() - at < FAILED_FEEDBACK_MS
+		if (!groupValue) return [...this.failures.values()].some(fresh)
+		const key = this.resolveGroup(groupValue) ?? String(groupValue)
+		return fresh(this.failures.get(key))
+	}
+
+	/**
+	 * Why a group/cue lookup failed. Before ShowSign has answered once there are no groups or cues
+	 * to look in, so the honest reason is the connection, not a missing group.
+	 */
+	lookupError(missing) {
+		if (!this.context.event) {
+			return new Error(`ShowSign not reached yet${this.lastError ? `: ${this.lastError}` : ''}`)
+		}
+		return new Error(`no ${missing} in this ShowSign event`)
 	}
 
 	async fireCue(groupValue, cueValue, ttlSeconds) {
@@ -277,14 +287,14 @@ export default class ShowSignInstance extends InstanceBase {
 		const cueId = this.resolveCue(cueValue)
 		if (!groupId || !cueId) {
 			const missing = !groupId ? `group "${groupValue ?? ''}"` : `cue "${cueValue ?? ''}"`
-			this.actionFailed('Fire', new Error(`no ${missing} in this ShowSign event`), groupId ?? String(groupValue ?? ''))
+			this.actionFailed('Fire', this.lookupError(missing), groupId ?? String(groupValue ?? ''))
 			return
 		}
 		const body = { groupId, cueId }
 		if (ttlSeconds > 0) body.ttlSeconds = ttlSeconds
 		try {
 			await this.api('/automation/announce', { method: 'POST', body: JSON.stringify(body) })
-			this.actionSucceeded()
+			this.actionSucceeded(groupId)
 			await this.poll()
 		} catch (e) {
 			this.actionFailed('Fire', e, groupId)
@@ -294,16 +304,12 @@ export default class ShowSignInstance extends InstanceBase {
 	async clearGroup(groupValue) {
 		const groupId = this.resolveGroup(groupValue)
 		if (!groupId) {
-			this.actionFailed(
-				'Clear',
-				new Error(`no group "${groupValue ?? ''}" in this ShowSign event`),
-				String(groupValue ?? ''),
-			)
+			this.actionFailed('Clear', this.lookupError(`group "${groupValue ?? ''}"`), String(groupValue ?? ''))
 			return
 		}
 		try {
 			await this.api('/automation/clear', { method: 'POST', body: JSON.stringify({ groupId }) })
-			this.actionSucceeded()
+			this.actionSucceeded(groupId)
 			await this.poll()
 		} catch (e) {
 			this.actionFailed('Clear', e, groupId)

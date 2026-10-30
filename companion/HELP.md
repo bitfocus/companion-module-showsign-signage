@@ -43,7 +43,9 @@ and the reason shows in the log and in `$(showsign:last_action_error)`.
   group is currently showing the chosen cue, so your surface reflects what's live on the walls.
 - **Last action failed** — lights a button (red by default) for 10 seconds after a Fire or
   Clear press that ShowSign refused or couldn't receive (a deleted cue, a revoked key, no
-  network). Choose a group to light it only for presses on that group.
+  network). Choose a group to light it only for presses on that group; each group keeps its own
+  10 seconds, so a press on another group doesn't clear it. A press made before Companion has
+  reached ShowSign at all reports _ShowSign not reached yet_ with the connection's reason.
 
 ## Variables
 
