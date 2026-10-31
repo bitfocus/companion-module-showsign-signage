@@ -121,7 +121,22 @@ export default class ShowSignInstance extends InstanceBase {
 		return (this.secrets?.apikey || '').trim()
 	}
 
+	/** The key travels with every request, so only ever over https (plain http only to this machine, for testing). */
+	urlProblem() {
+		let u
+		try {
+			u = new URL(this.baseUrl())
+		} catch {
+			return 'The API base URL isn\'t a valid address'
+		}
+		if (u.protocol === 'https:') return null
+		if (u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) return null
+		return 'The API base URL must start with https:// (the automation key must never travel unencrypted)'
+	}
+
 	async api(path, options = {}) {
+		const problem = this.urlProblem()
+		if (problem) throw new Error(problem)
 		const res = await fetch(`${this.baseUrl()}${path}`, {
 			...options,
 			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -159,6 +174,11 @@ export default class ShowSignInstance extends InstanceBase {
 	async poll() {
 		if (!this.baseUrl() || !this.apiKey()) {
 			this.setError(InstanceStatus.BadConfig, 'Set the API base URL and automation key')
+			return
+		}
+		const problem = this.urlProblem()
+		if (problem) {
+			this.setError(InstanceStatus.BadConfig, problem)
 			return
 		}
 		if (this.polling) return // previous poll still in flight
